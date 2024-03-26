@@ -1,5 +1,6 @@
 import Pkg
 Pkg.activate(".")
+Pkg.instantiate()
 
 begin
     using Distributions
@@ -24,8 +25,8 @@ rotational_frequecy = 5 #days
 #the pixel size is 1 m
 subpasture_size = (500,200) #m x m
 subpasture_area = 500*200 #m^2
-n_eaten = 500*200/5 #cells eaten per day
-landscape_edge_length = 100000 #m
+#n_eaten = Int(500*200/5) #cells eaten per day
+landscape_edge_length = 10 #m
 patch_size = 2 #m
 minimum_height = 3 #cm, the minimum height of plants to be eaten
 day_of_cattle_release = 10 #day of the year when cattle are released
@@ -114,6 +115,8 @@ function scale_matrix(patch_matrix::Matrix{T}, landscape_matrix::Matrix{T}) wher
     # Fill in the values by replicating each element
     for i in 1:new_rows
         for j in 1:new_cols
+            #Int(div(i-1, scale_factor) + 1) is used to get the row index of the patch matrix.
+            #The Int() in needed to convert the result of div to an integer, as indexes are integers.
             scaled_matrix[i, j] = patch_matrix[Int(div(i-1, scale_factor) + 1), Int(div(j-1, scale_factor) + 1)]
         end
     end
@@ -141,95 +144,96 @@ function patch_preferences(landscape_size::Int, patch_size::Int)
     return scaled_matrix
 end
 
+function nth_smallest(A::AbstractArray{T,N}, n::Integer) where {T,N}
+    threshold = sort(vec(A); alg=PartialQuickSort(n))[n]
+    return threshold
+end
+
+
+  
 """
 This function is used to create a matrix to identify which cells in a pasture are grazed.
     We assume that the cows will eat the n_eaten cells with the highest preference values.
-
+    Grazed cells get a value of 0, while ungrazed cells get a value of 1.
 """
-function find_grazed_cells(M::Array{Matrix{T}}, n_eaten::Int) where T
-    ungrazed_cells = Matrix{Int8}[]
-    for i in 1:length(M)
-        #Negate the matrix (all values become negative), the find the nth smallest value (furthest from zero)
-        #Then negate that value to get the threshold for grazing.
-        threshold = -nthsmallest(-M[i], n_eaten)
-        #Create a matrix of the same size as M, where each cell is 1 if the value in M is less than the threshold
-        #This allows us to directly multiply the resulting matrix with the plant_height matrix to calculate the new height values
-        escapes_grazing = (Int.(M[i] .< threshold))
-        push!(grazed_cells, escapes_grazing)
-    end
+function find_grazed_cells(grazing_area::Matrix{T}, n_eaten::Int) where T
+    #Negate the matrix (all values become negative), the find the nth smallest value (furthest from zero)
+    #Then negate that value to get the threshold for grazing.
+    threshold = -nth_smallest(-grazing_area, n_eaten)
+    #Create a matrix of the same size as M, where each cell is 1 if the value in M is less than the threshold
+    #This allows us to directly multiply the resulting matrix with the plant_height matrix to calculate the new height values
+    escapes_grazing = (Int.(grazing_area .< threshold))
    
-    return ungrazed_cells
+    return escapes_grazing
 end
-
-function find_available_cells(M::Array{Matrix{T}}, threshold::Float64) where T
-    available_cells = Matrix{Int8}[]
-    for i in 1:length(M)
-        M[i] = Int.(M[i] .> threshold)
-        push!(available_cells, M[i])
-    end
-    return available_cells
+"""
+This function identifies the plant height cells that are above a certain height
+    threshold. It returns a matrix of the same size as the pasture area, with 1s in the cells
+    that are above the threshold and 0s in the cells that are below the threshold.
+"""
+function find_available_cells(pasture_area::Matrix{T}, threshold::Float16) where T
+        above_height_threshold = Int.(pasture_area .>= threshold)
+        return above_height_threshold
 end
-
+"""
+This function is used to increment the plant heights in the pasture. It takes the current plant heights
+    an increment function, and the day of the simulation as arguments. The increment function is used to
+    calculate the amount of growth that occurs on that day.
+"""
 function increment_heights(heights::Matrix{T}, increment_function::Function, day::Int) where T
     increment = increment_function(day)
     new_heights = heights.+increment
     return new_heights
 end
 
-function make_image(list_of_heights::Array{Matrix{T},1}, day::Int) where T
-    nrows, ncols = 10, 10
-    # Check if the number of matrices matches the grid size
-if length(list_of_heights) != nrows * ncols
-    error("Number of matrices (", length(list_of_heights), ") doesn't match grid size (", nrows * ncols, ")")
-  end
+function stitch_matrices(matrices::Vector{<:AbstractMatrix})
+    # Check if all matrices have the same dimensions
+    if all(all(size(m) == size(matrices[1])) for m in matrices)
+        n = size(matrices[1])[1]  # Get dimension size from first matrix
+        result = zeros(n * 10, n * 10)  # Pre-allocate result matrix
   
-  # Function to stack matrices horizontally
-  function hstack_matrices(mats)
-    return hcat(mats...)
-  end
-  
-  # Function to stack matrices vertically
-  function vstack_matrices(mats)
-    big_mat = vcat(mats[1:ncols])
-    for i in 2:nrows
-      big_mat = vcat(big_mat, vcat(mats[(i*ncols + 1):((i+1)*ncols)]))
+        for i in 1:10
+            for j in 1:10
+                start_row = (i - 1) * n + 1
+                end_row = i * n
+                start_col = (j - 1) * n + 1
+                end_col = j * n
+                result[start_row:end_row, start_col:end_col] = matrices[(i - 1) * 10 + j]
+            end
+          end
+        return result
+    else
+        error("All matrices must have the same dimensions")
     end
-    return big_mat
   end
+
+function make_image(list_of_heights::Array{Matrix{T},1}, day::Int) where T
+    big_matrix = stitch_matrices(list_of_heights)
   
-  # Create a new empty matrix to store the stitched data
-  big_matrix = zeros(size(first(list_of_heights))[1], size(first(list_of_heights))[2] * ncols)
-  
-  # Loop through rows and stack matrices horizontally
-  for i in 1:nrows
-    starting_index = (i-1)*ncols + 1
-    ending_index = i*ncols
-    row_matrices = list_of_heights[starting_index:ending_index]
-    big_matrix[i, :] = hstack_matrices(row_matrices)
-  end
-  
-  # Stack the rows of the big_matrix vertically
-  big_matrix = vstack_matrices(big_matrix)
-  color_ramp = cgrad([:brown, :yellow, :green], [0, 0.5, 1])
+    color_ramp = cgrad([:darkgoldenrod, :lightyellow, :green], [0, 20, 40])
   # Create a plot with appropriate dimensions
-  plot(big_matrix, aspect = ncols/nrows, c=color_ramp, clim=(0, 1))  # Adjust clim for your value range
+  
+  pasture_plot = heatmap(big_matrix, c = color_ramp, clim = (0, 40), colorbar = :none, axis = nothing, aspect_ratio = 1.0);  # Adjust clim for your value range
   
   # Customize the plot (optional)
-  xlabel("Columns")
-  ylabel("Rows")
-  title("Stitched Matrix (10x10)")
-  
-  # Display the plot
-  jpeg("day_$(day).jpg")
+  day_padded = lpad(string(day), 3, '0')
+    # Display the plot
+    png(pasture_plot, "/home/isaac/Coding/grazing_simulation/images/day_$(day_padded).png")
 end
 
-cattle_access_continuous = ones(Int8, 1000,1000)
+"""
+Creates a 100-element list of matrices of plant preferences. Each matrix is 1000 x 1000.
+    The matrices are created by multiplying two matrices of the same size, one with a patch size of 10 and the other with a patch size of 125.
+    This is used to create a smoother landscape that hopefully allows better visulaization of the grazing patterns.
+    The resulting matrix is then appended to the preference_list.
 
-function populate_preference_list()
+    This should only be called one time at the start of the simulation.
+"""
+function populate_preference_list(pasture_size::Int, patchsize1::Int, patchsize2::Int)
     preference_list = []
     for i in 1:100
-        mat1 = patch_preferences(1000, 10)
-        mat2 = patch_preferences(1000, 125)
+        mat1 = patch_preferences(pasture_size, patchsize1)
+        mat2 = patch_preferences(pasture_size, patchsize2)
         mat3 = mat1 .* mat2
         push!(preference_list, mat3)
     end
@@ -254,40 +258,55 @@ function stitch_subpastures(amp_subpastures::Vector{Matrix{T}}) where T
 
     return full_matrix
 end
-function plant_height_list()
-    plant_heights = []
+"""
+Generates a list of length 100 of matrices of plant heights. Each matrix is 1000 x 1000.
+At the start of the growing season we assume the plant height to be 3, so that cattle grazing can start on 
+day 1. The plant height will be incremented by the growth function each day as we call increment_heights() 
+"""
+function plant_height_list(pasture_size::Tuple{Int, Int})
+    plant_heights = Array{Float16, 2}[]
     for i in 1:100
-        mat = zeros(Float16, 1000, 1000)
+        mat = ones(Float16, pasture_size[1], pasture_size[2]) .* 3
         push!(plant_heights, mat)
     end
     return plant_heights
 end
 
-function cattle_access_list(amp::Bool)
+"""
+Creates a list of 100 pastures for the simulation. If `amp` is true, the pastures are created using the AMP system, where the 
+    1000 x 1000 pasture is divided into 10 subpastures, and one of the subpastures is selected to be grazed.
+"""
+function cattle_access_list(amp::Bool, pasture_size::Tuple{Int, Int})
     cattle_access_list = []
-    starting_subpastures = start_positions()
+    subpasture_dims = (Int(pasture_size[1]/5), Int(pasture_size[2]/2))
     for i in 1:100
         if amp
-            mat = make_amp_subpastures(starting_subpastures[i])
+            pasture = make_amp_subpastures(subpasture_dims)
         else
-            mat = ones(Int8, 1000, 1000)
+            pasture = ones(Int8, pasture_size[1], pasture_size[2])
         end
-        push!(cattle_access_list, mat)
+        push!(cattle_access_list, pasture)
     end
     return cattle_access_list
 end
 """
 This function is used to initialize the subpastures for the AMP system. It creates a list of 10 subpastures. 
-    The pasture initially used for grazing is set by the random_start_position argument.
+    Each time the function is called it generates a random starting position for the cattle to start in. 
 """
-function make_amp_subpastures(random_start_position::Int)
-    amp_pastures = Matrix{Int8}[]
+function make_amp_subpastures(subpasture_dims::Tuple{Int,Int})
+    amp_subpastures = Matrix{Int8}[]
+    random_start_position = rand(1:10)
     for i in 1:10
-        mat = zeros(Int8, 500, 200)
-        push!(amp_pastures, mat)
+        # Create a 200 row x 500 col matrix of zeros
+        mat = zeros(Int8, subpasture_dims[1], subpasture_dims[2])
+        #add the matrix to the list of subpastures
+        push!(amp_subpastures, mat)
     end
-    amp_pastures[random_start_position] = ones(Int8, 500, 200)
-    full_pasture = stitch_subpastures(amp_pastures)
+    #replace the matrix at the random start position with a matrix of ones
+    amp_subpastures[random_start_position] = ones(Int8, subpasture_dims[1], subpasture_dims[2])
+    #stitch the subpastures together to form the full pasture
+    full_pasture = stitch_subpastures(amp_subpastures)
+    #This should return one 1000 x 1000 matrix
     return full_pasture
 end
 
@@ -296,18 +315,22 @@ This function is used to split the full pasture into a list of subpastures.
     This helps with the rotation, as we then circshift the list of subpastures and reconstruct the full pasture.
 
 """
-function split_subpastures(full_matrix::Matrix{T}) where T
-    # Horizontally split the full matrix into two halves
-    first_half, second_half = full_matrix[:, 1:500], full_matrix[:, 501:end]
+function split_subpastures(full_matrix::Matrix{T}, subpasture_dims::Tuple{Int, Int}) where T
+    # Horizontally split the full matrix into two halves of 500 columns each
+    
+    first_half, second_half = full_matrix[:, 1:subpasture_dims[2]], full_matrix[:, subpasture_dims[2]+1:end]
 
     # Vertically split each half into smaller matrices
-    first_half_matrices = [first_half[(i-1)*100+1:i*100, :] for i in 1:5]
-    second_half_matrices = [second_half[(i-1)*100+1:i*100, :] for i in 1:5]
+    #The indexing works as follows: ((i-1)*100+1):(i*100) will give us the indices for the ith 100x500 matrix
+    # for example, if i = 2, then ((2-1)*100+1):(2*100) = 101:200
+    #the single : at the end of the index is used to select all columns
+    first_half_matrices = [first_half[((i-1)*subpasture_dims[1]+1):(i*subpasture_dims[1]), :] for i in 1:5]
+    second_half_matrices = [second_half[((i-1)*subpasture_dims[1]+1):(i*subpasture_dims[1]), :] for i in 1:5]
 
     # Combine the smaller matrices into a list
-    matrices = vcat(first_half_matrices, second_half_matrices)
+    subpasture_list = vcat(first_half_matrices, second_half_matrices)
 
-    return matrices
+    return subpasture_list
 end
 """
 This function is used to rotate the subpasture that the cattle are grazing on. It takes 
@@ -315,14 +338,12 @@ the list of 100 pastures as an argument. For each pasture it splits it into a li
 that represent the subpastures, then it uses circshift to move the 'grazed' pasture up 
 one index in the list, then it stitches the pastures back together and returns the full pasture.
     """
-function rotate_cattle(pastures::Array{Matrix{T}}) where T
-    rotated_pastures = []
-    for i in 1:100
-        subpastures = split_subpastures(pastures[i])
-        new_subpastures = circshift(subpastures, 1)
-        new_pasture = stitch_subpastures(new_subpastures)
-        rotated_pastures[i] = new_pasture
-    end
+function rotate_cattle(pastures::Matrix{T}) where T
+    subpasture_dims = (Int(size(pastures,1)/5), Int(size(pastures,2)/2))
+    subpastures = split_subpastures(pastures, subpasture_dims)
+    new_subpastures = circshift(subpastures, 1)
+    new_pasture = stitch_subpastures(new_subpastures)
+    return new_pasture
 end
 """
 Generates a list of random start positions for the AMP subpastures
@@ -332,26 +353,54 @@ function start_positions()
 end
 
 function simulate_grazing()
-    preference_list = populate_preference_list()
-    plant_heights = plant_height_list()
-    cattle_accesses = cattle_access_list(true)
-    for i in 1:grazing_period
+    #subpasture_rows = 200
+    pasture_size = 100
+    subpasture_dims = (Int(pasture_size/5), Int(pasture_size/2))
+    amp_on = false
+    n_eaten = 200#Int(subpasture_dims[1]*subpasture_dims[2]/10)
+    preference_list = populate_preference_list(pasture_size, 20, 5)
+    plant_heights = plant_height_list((pasture_size, pasture_size))
+    cattle_accesses = cattle_access_list(amp_on, (pasture_size, pasture_size))
+    for i in 1:100#grazing_period
+        ##increment the plant heights for each pasture in the list
         plant_heights = increment_heights.(plant_heights, instantaneous_plant_growth, i)
-        cattle_access = cattle_accesses[i]
-        preference = preference_list[i]
-        available_cells = find_available_cells(cattle_access, 3)
-        available_preferences = available_cells .* preference
+        #print("max plant height is $(maximum(plant_heights[1]))\n")
+        #multiply the cattle access matrix by the plant heights to get the accessible plant heights
+        accessible_cells_heights = [a .* b for (a,b) in zip(cattle_accesses, plant_heights)] 
+        #identify all cells with a plant height >= 3
+        available_cells = find_available_cells.(accessible_cells_heights, Float16(3))
+        #print("available cells for day $(i): $(available_cells[1])\n")
+        #multiply the available cells by the preference list to get the preference values for each cell
+        #unavailable cells will have their preference values set to 0
+        #available cells values will be preference * 1
+        available_preferences = [a .* b for (a,b) in zip(available_cells, preference_list)]
+        #print("available_preferences: $(available_preferences[1])\n")
+        ### TODO: change the n_eaten back into 20000
         grazed_cells = find_grazed_cells.(available_preferences, n_eaten)
-        #plant_heights[i] = plant_heights[i] .* available_cells
-        plant_heights[i] = plant_heights[i] .* grazed_cells
+        #print("grazed cells: $(grazed_cells[1])\n")
+        #multiply the plant heights by the grazed cells to get the new plant heights
+        #grazing sets the plant height to zero. 
+        plant_heights = [a .* b for (a,b) in zip(plant_heights, grazed_cells)]
+        #print("plant heights are now: $(plant_heights[1])\n")
+        
         make_image(plant_heights, i)
-        cattle_access_list = rotate_cattle(cattle_access_list)
+        #print("saved image for day $(i)")
+        
+        print(cattle_accesses[1])
+        if i % rotational_frequecy == 0 && amp_on
+            cattle_accesses = rotate_cattle.(cattle_accesses)
+        end
+        print(cattle_accesses[1])
+        
     end
 end
 
-#= function create_gif()
-    run(`convert -delay 10 -loop 0 day_*.jpg grazing_simulation.gif`)
-end =#
+function create_gif()
+    run(`ffmpeg -f image2 -pattern_type glob -i '*.png' output_amp.gif
+`)
+end
 
 simulate_grazing()
 #create_gif()
+
+# TODO Why do some fields never grow high?
